@@ -246,6 +246,7 @@ function loginView({ values = {}, error } = {}) {
       ${field({ label: "Username or email", name: "login", value: values.login, autocomplete: "username" })}
       ${field({ label: "Password", name: "password", type: "password", autocomplete: "current-password" })}
       <button class="button button-primary button-block" type="submit">Sign in</button>
+      <p class="auth-help">Lost your password? Email us at <a href="mailto:olivercraftboycompany@gmail.com">olivercraftboycompany@gmail.com</a></p>
     </form>
     ${
       passkeysSupported

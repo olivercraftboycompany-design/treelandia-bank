@@ -783,6 +783,14 @@ form + form .button-block {
   margin-top: 4px;
 }
 
+.auth-help {
+  margin: 12px 0 16px;
+  color: var(--muted);
+  font-size: 13px;
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+
 .auth-switch {
   margin: 20px 0 0;
   padding-top: 16px;
