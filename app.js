@@ -43,6 +43,10 @@ const ICONS = {
   settings:
     '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/>',
   chevron: '<path d="m9 6 6 6-6 6"/>',
+  loans: '<rect x="3" y="6" width="18" height="12" rx="2"/><circle cx="12" cy="12" r="2.5"/><path d="M6.5 9.5v5M17.5 9.5v5"/>',
+  inflation: '<path d="M3 17 9 11l4 4 8-8"/><path d="M15 7h6v6"/>',
+  fingerprint:
+    '<path d="M12 11v3"/><path d="M8.5 9.5a3.5 3.5 0 0 1 7 0V14a7 7 0 0 1-1 3.6"/><path d="M5.5 8a7 7 0 0 1 13 0c.3 1 .5 2 .5 3v3"/><path d="M5 12v2a7 7 0 0 0 .8 3.3"/><path d="M8.5 13.5v.5a3.5 3.5 0 0 0 .5 1.8"/>',
 };
 
 function icon(name) {
@@ -151,6 +155,8 @@ const NAV = [
   { href: "/request", label: "Request", icon: "request", section: "request" },
   { href: "/requests", label: "Requests", icon: "inbox", section: "requests" },
   { href: "/people", label: "People", icon: "search", section: "people" },
+  { href: "/loans", label: "Loans", icon: "loans", section: "loans" },
+  { href: "/inflation", label: "Inflation", icon: "inflation", section: "inflation" },
 ];
 
 function publicPage(body) {
@@ -241,8 +247,173 @@ function loginView({ values = {}, error } = {}) {
       ${field({ label: "Password", name: "password", type: "password", autocomplete: "current-password" })}
       <button class="button button-primary button-block" type="submit">Sign in</button>
     </form>
+    ${
+      passkeysSupported
+        ? html`<button class="button button-block button-icon passkey-signin" type="button" data-passkey-login>${icon("fingerprint")}<span>Sign in with fingerprint</span></button>`
+        : ""
+    }
     <p class="auth-switch">New to ${BANK_NAME}? <a href="#/signup">Open an account</a></p>
   </section>`);
+}
+
+const passkeysSupported = Boolean(window.PublicKeyCredential && navigator.credentials);
+const b64 = {
+  encode: (buffer) => btoa(String.fromCharCode(...new Uint8Array(buffer))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, ""),
+  decode: (text) => Uint8Array.from(atob(text.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(text.length / 4) * 4, "=")), (c) => c.charCodeAt(0)),
+};
+
+async function passkeySignIn(button) {
+  button.disabled = true;
+  try {
+    const options = await api("/login/passkey/options", {});
+    const credential = await navigator.credentials.get({ publicKey: { ...options, challenge: b64.decode(options.challenge) } });
+    afterLogin(
+      await api("/login/passkey", {
+        id: credential.id,
+        clientDataJSON: b64.encode(credential.response.clientDataJSON),
+        authenticatorData: b64.encode(credential.response.authenticatorData),
+        signature: b64.encode(credential.response.signature),
+      }),
+    );
+  } catch (err) {
+    button.disabled = false;
+    if (err.name === "NotAllowedError" || err.name === "AbortError") return;
+    loginView({ error: err.message || "That passkey didn't work." });
+  }
+}
+
+document.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-passkey-login]");
+  if (button) passkeySignIn(button);
+});
+
+const LOAN_STATUS = { pending: "Pending", active: "Active", repaid: "Repaid", denied: "Denied", overdue: "Overdue" };
+
+function loanBadge(loan) {
+  return html`<span class="status status-loan-${loan.status}">${LOAN_STATUS[loan.status]}</span>`;
+}
+
+function amountValue(cents) {
+  return `${Math.floor(cents / 100)}.${String(cents % 100).padStart(2, "0")}`;
+}
+
+async function loansPage({ errors = {}, values = {}, repayErrors = {} } = {}) {
+  const data = await api("/loans");
+  const loan = data.loan;
+  const overdue = loan?.status === "overdue";
+  const open = loan && (loan.status === "active" || overdue);
+  bankPage(
+    "loans",
+    html`<h1 class="page-title">Loans</h1>
+    ${
+      loan
+        ? html`<section class="panel${overdue ? " panel-overdue" : ""}">
+            <header class="panel-head"><h2>Current loan</h2>${loanBadge(loan)}</header>
+            <dl class="details">
+              <div><dt>Amount</dt><dd>${money(loan.amount)}</dd></div>
+              <div><dt>Total owed</dt><dd>${money(loan.owed)}</dd></div>
+              ${
+                open
+                  ? html`<div><dt>Paid</dt><dd>${money(loan.repaid)}</dd></div>
+                    <div><dt>Left to pay</dt><dd class="strong">${money(loan.remaining)}</dd></div>
+                    <div><dt>Due</dt><dd class="${overdue ? "text-red" : ""}">${time(loan.dueAt)}</dd></div>`
+                  : ""
+              }
+              <div><dt>Reason</dt><dd>${loan.reason}</dd></div>
+            </dl>
+          </section>
+          ${
+            open
+              ? html`<section class="panel panel-form">
+                  <header class="panel-head"><h2>Repay</h2></header>
+                  <form data-action="loan-repay" novalidate>
+                    ${field({ label: "Amount", name: "amount", value: values.repay ?? amountValue(Math.min(loan.remaining, data.balance) || loan.remaining), prefix: SYMBOL, inputmode: "decimal", autocomplete: "off", error: repayErrors.amount })}
+                    <button class="button button-primary" type="submit">Pay</button>
+                  </form>
+                </section>`
+              : ""
+          }`
+        : html`<section class="panel panel-form">
+            <header class="panel-head"><h2>Request a loan</h2><span class="muted">Limit ${money(data.limit)}</span></header>
+            ${
+              data.limit > 0
+                ? html`<form data-action="loan-request" novalidate>
+                    ${field({ label: "Amount", name: "amount", value: values.amount, prefix: SYMBOL, inputmode: "decimal", autocomplete: "off", error: errors.amount })}
+                    ${field({ label: "Reason", name: "reason", value: values.reason, maxlength: 200, autocomplete: "off", error: errors.reason })}
+                    <dl class="details details-flush">
+                      <div><dt>Interest</dt><dd>${Math.round(data.rate * 100)}%</dd></div>
+                      <div><dt>Term</dt><dd>${data.termDays} days</dd></div>
+                    </dl>
+                    <button class="button button-primary" type="submit">Request</button>
+                  </form>`
+                : html`<p class="empty">Loans aren't available for your account.</p>`
+            }
+          </section>`
+    }
+    ${
+      data.history.length
+        ? html`<section class="panel">
+            <header class="panel-head"><h2>History</h2></header>
+            <ul class="list">
+              ${data.history.map(
+                (l) => html`<li class="row">
+                  <div class="row-main"><span class="row-title">${money(l.amount)}</span><span class="row-sub">${time(l.requestedAt)} \u00b7 ${l.reason}</span></div>
+                  ${loanBadge(l)}
+                </li>`,
+              )}
+            </ul>
+          </section>`
+        : ""
+    }`,
+    "Loans",
+  );
+}
+
+function formatRate(value) {
+  if (value === null || value === undefined || !Number.isFinite(value)) return "\u2014";
+  const fixed = Math.abs(value) < 0.005 ? "0.00" : value.toFixed(2);
+  return `${value > 0.005 ? "+" : ""}${fixed}%`;
+}
+
+function supplyChart(days) {
+  const width = 320;
+  const height = 140;
+  const pad = { top: 10, right: 8, bottom: 18, left: 8 };
+  const max = Math.max(...days.map((d) => d.supply), 1);
+  const innerW = width - pad.left - pad.right;
+  const innerH = height - pad.top - pad.bottom;
+  const x = (i) => pad.left + (days.length === 1 ? innerW / 2 : (i / (days.length - 1)) * innerW);
+  const y = (v) => pad.top + innerH - (v / max) * innerH;
+  let points = days.map((d, i) => `${x(i).toFixed(1)},${y(d.supply).toFixed(1)}`);
+  if (days.length === 1) points = [`${pad.left},${y(days[0].supply).toFixed(1)}`, `${width - pad.right},${y(days[0].supply).toFixed(1)}`];
+  const grid = [0, 0.25, 0.5, 0.75, 1].map((f) => {
+    const gy = (pad.top + innerH * f).toFixed(1);
+    return `<line x1="${pad.left}" y1="${gy}" x2="${width - pad.right}" y2="${gy}"/>`;
+  });
+  const label = (s) => s.slice(5).replace("-", "/");
+  return new Safe(
+    `<svg class="chart" viewBox="0 0 ${width} ${height}" role="img" aria-label="Money supply"><g class="chart-grid">${grid.join("")}</g><polyline class="chart-line" points="${points.join(" ")}"/><text class="chart-label" x="${pad.left}" y="${height - 4}">${label(days[0].day)}</text><text class="chart-label" x="${width - pad.right}" y="${height - 4}" text-anchor="end">${label(days.at(-1).day)}</text></svg>`,
+  );
+}
+
+async function inflationPage() {
+  const data = await api("/inflation");
+  bankPage(
+    "inflation",
+    html`<h1 class="page-title">Inflation</h1>
+    <div class="stats">
+      <div class="stat"><span class="stat-label">Money supply</span><span class="stat-value">${money(data.supply)}</span></div>
+      <div class="stat"><span class="stat-label">In circulation</span><span class="stat-value">${money(data.circulation)}</span></div>
+      <div class="stat"><span class="stat-label">7 days</span><span class="stat-value">${formatRate(data.week)}</span></div>
+      <div class="stat"><span class="stat-label">30 days</span><span class="stat-value">${formatRate(data.month)}</span></div>
+      <div class="stat"><span class="stat-label">Since start</span><span class="stat-value">${formatRate(data.start)}</span></div>
+    </div>
+    <section class="panel">
+      <header class="panel-head"><h2>Money supply</h2></header>
+      ${data.days.length ? html`<div class="chart-wrap">${supplyChart(data.days)}</div>` : html`<p class="empty">No data yet.</p>`}
+    </section>`,
+    "Inflation",
+  );
 }
 
 function codeView({ error } = {}) {
@@ -731,6 +902,8 @@ const ROUTES = [
   [/^\/people\/([^/]+)$/, personPage],
   [/^\/settings$/, settingsPage],
   [/^\/settings\/two-step$/, twoStepSetupPage],
+  [/^\/loans$/, loansPage],
+  [/^\/inflation$/, inflationPage],
 ];
 
 async function route() {
@@ -903,6 +1076,32 @@ const ACTIONS = {
     } catch (err) {
       if (err.status === 401) return;
       settingsPage({ emailErrors: err.errors, emailValue: values.email });
+    }
+  },
+
+  async "loan-request"(form) {
+    const values = formValues(form);
+    try {
+      await api("/loans", values);
+      flash = "Loan requested.";
+      loansPage();
+    } catch (err) {
+      if (err.status === 401) return;
+      loansPage({ errors: err.errors, values });
+    }
+  },
+
+  async "loan-repay"(form) {
+    const values = formValues(form);
+    if (!window.confirm("Make this loan payment?")) return;
+    try {
+      await api("/loans/repay", values);
+      flash = "Payment made.";
+      user = null;
+      loansPage();
+    } catch (err) {
+      if (err.status === 401) return;
+      loansPage({ repayErrors: err.errors, values: { repay: values.amount } });
     }
   },
 

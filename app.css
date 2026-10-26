@@ -823,7 +823,7 @@ form + form .button-block {
     left: 0;
     z-index: 10;
     display: grid;
-    grid-template-columns: repeat(5, 1fr);
+    grid-template-columns: repeat(7, 1fr);
     padding-bottom: env(safe-area-inset-bottom);
     background: #fff;
     border-top: 1px solid var(--line);
@@ -969,4 +969,84 @@ form + form .button-block {
   border: 1px solid var(--line);
   border-radius: var(--radius);
   text-align: center;
+}
+
+.status-loan-active {
+  background: #e6f2ea;
+  color: var(--green);
+}
+
+.status-loan-pending {
+  background: #fbf1dc;
+  color: var(--amber);
+}
+
+.status-loan-overdue,
+.status-loan-denied {
+  background: #f8e5e6;
+  color: var(--red);
+}
+
+.text-red {
+  color: var(--red);
+}
+
+.panel-overdue {
+  border-color: var(--red);
+}
+
+tr.is-overdue td {
+  color: var(--red);
+}
+
+.details-flush {
+  margin: 0 0 16px;
+  padding: 0;
+}
+
+.list-flush {
+  margin: 0 -20px 16px;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+
+.chart-wrap {
+  padding: 12px 16px 16px;
+}
+
+.chart {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.chart-grid line {
+  stroke: var(--line);
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+
+.chart-line {
+  fill: none;
+  stroke: var(--navy);
+  stroke-width: 2;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+  vector-effect: non-scaling-stroke;
+}
+
+.chart-label {
+  fill: var(--muted);
+  font-size: 10px;
+  font-family: var(--font);
+}
+
+.passkey-signin {
+  margin-top: 12px;
+}
+
+@media (max-width: 720px) {
+  .tabbar-link {
+    font-size: 10px;
+  }
 }
