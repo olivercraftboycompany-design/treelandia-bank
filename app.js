@@ -8,6 +8,7 @@ let token = localStorage.getItem(TOKEN_KEY);
 let user = null;
 let flash = null;
 let pendingSend = null;
+let loginStep = null;
 
 class Safe {
   constructor(value) {
@@ -192,7 +193,38 @@ function bankPage(section, body, title) {
 }
 
 function focusFirstError() {
+  enhancePasswords();
   app.querySelector("[aria-invalid=true]")?.focus();
+}
+
+const EYE =
+  '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg>';
+const EYE_OFF =
+  '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.6 5.1A10.8 10.8 0 0 1 12 5c6.4 0 10 7 10 7a17.6 17.6 0 0 1-2.4 3.3"/><path d="M6.6 6.6C3.8 8.4 2 12 2 12s3.6 7 10 7a9.9 9.9 0 0 0 5.4-1.6"/><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/><path d="m3 3 18 18"/></svg>';
+
+function enhancePasswords() {
+  for (const input of app.querySelectorAll('input[type="password"]')) {
+    const wrap = document.createElement("div");
+    wrap.className = "password-wrap";
+    input.replaceWith(wrap);
+    wrap.append(input);
+    const toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.className = "reveal";
+    const set = (shown) => {
+      input.type = shown ? "text" : "password";
+      toggle.innerHTML = shown ? EYE_OFF : EYE;
+      toggle.setAttribute("aria-label", shown ? "Hide password" : "Show password");
+      toggle.setAttribute("aria-pressed", String(shown));
+    };
+    toggle.addEventListener("click", () => {
+      set(input.type === "password");
+      input.focus();
+    });
+    input.form?.addEventListener("submit", () => set(false));
+    set(false);
+    wrap.append(toggle);
+  }
 }
 
 function errorPage(section, error) {
@@ -211,6 +243,46 @@ function loginView({ values = {}, error } = {}) {
     </form>
     <p class="auth-switch">New to ${BANK_NAME}? <a href="#/signup">Open an account</a></p>
   </section>`);
+}
+
+function codeView({ error } = {}) {
+  if (!loginStep) return go("/login");
+  document.title = `Verification code - ${BANK_NAME}`;
+  publicPage(html`<section class="auth-card">
+    <h1>Verification code</h1>
+    ${alert(error)}
+    <form data-action="code" novalidate>
+      ${field({ label: "Code", name: "code", autocomplete: "one-time-code", maxlength: 12 })}
+      <button class="button button-primary button-block" type="submit">Continue</button>
+    </form>
+    <p class="auth-switch"><a href="#/login">Back to sign in</a></p>
+  </section>`);
+}
+
+function newPasswordView({ errors = {}, error } = {}) {
+  if (!loginStep) return go("/login");
+  document.title = `Choose a new password - ${BANK_NAME}`;
+  publicPage(html`<section class="auth-card">
+    <h1>Choose a new password</h1>
+    ${alert(error)}
+    <form data-action="new-password" novalidate>
+      ${field({ label: "New password", name: "password", type: "password", autocomplete: "new-password", error: errors.password })}
+      ${field({ label: "Confirm new password", name: "confirm", type: "password", autocomplete: "new-password", error: errors.confirm })}
+      <button class="button button-primary button-block" type="submit">Save password</button>
+    </form>
+  </section>`);
+}
+
+const STEP_ROUTES = { code: "/login/code", password: "/login/new-password" };
+
+function afterLogin(data) {
+  if (data.step) {
+    loginStep = { challenge: data.challenge };
+    return go(STEP_ROUTES[data.step]);
+  }
+  loginStep = null;
+  saveSession(data);
+  go("/");
 }
 
 function signupView({ values = {}, errors = {}, error } = {}) {
@@ -537,8 +609,75 @@ async function personPage({ params }) {
   );
 }
 
-async function settingsPage({ emailErrors = {}, passwordErrors = {}, emailValue } = {}) {
+const SHIELD =
+  '<svg class="icon" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3 4.5 6v5.5c0 4.6 3.2 8.3 7.5 9.5 4.3-1.2 7.5-4.9 7.5-9.5V6z"/><path d="m9 12 2 2 4-4"/></svg>';
+
+function twoStepPanel(state, errors = {}) {
+  return html`<section class="panel panel-form" id="two-step">
+    <header class="panel-head"><h2>Two-step verification</h2><span class="badge${state.enabled ? " badge-on" : ""}">${state.enabled ? "On" : "Off"}</span></header>
+    ${
+      state.enabled
+        ? html`<dl class="details">
+            <div><dt>Backup codes left</dt><dd>${state.backupCodesLeft}</dd></div>
+          </dl>
+          <form data-action="two-step-off" novalidate>
+            ${field({ label: "Current password", name: "password", type: "password", autocomplete: "current-password", error: errors.password })}
+            ${field({ label: "Code", name: "code", autocomplete: "one-time-code", maxlength: 12, error: errors.code })}
+            <button class="button" type="submit">Turn off</button>
+          </form>`
+        : html`<a class="button button-primary button-icon" href="#/settings/two-step">${new Safe(SHIELD)}<span>Set up</span></a>`
+    }
+  </section>`;
+}
+
+function formatKey(secret) {
+  return secret.replace(/(.{4})/g, "$1 ").trim();
+}
+
+let twoStepSetup = null;
+
+async function twoStepSetupPage({ errors = {} } = {}) {
+  if (!twoStepSetup) {
+    try {
+      twoStepSetup = await api("/settings/two-step/setup", {});
+    } catch (err) {
+      if (err.status === 409) return go("/settings");
+      throw err;
+    }
+  }
+  bankPage(
+    "settings",
+    html`<h1 class="page-title">Two-step verification</h1>
+    <section class="panel panel-form two-step-setup">
+      <div class="qr-frame">${new Safe(twoStepSetup.qr)}</div>
+      <dl class="details">
+        <div><dt>Key</dt><dd class="mono secret">${formatKey(twoStepSetup.secret)}</dd></div>
+      </dl>
+      <form data-action="two-step-on" novalidate>
+        ${field({ label: "6-digit code", name: "code", autocomplete: "one-time-code", inputmode: "numeric", maxlength: 6, error: errors.code })}
+        <button class="button button-primary" type="submit">Turn on</button>
+        <a class="button" href="#/settings">Cancel</a>
+      </form>
+    </section>`,
+    "Two-step verification",
+  );
+}
+
+function backupCodesPage(codes) {
+  bankPage(
+    "settings",
+    html`<h1 class="page-title">Backup codes</h1>
+    <section class="panel panel-form">
+      <ol class="backup-codes mono">${codes.map((c) => html`<li>${c}</li>`)}</ol>
+      <a class="button button-primary" href="#/settings">Done</a>
+    </section>`,
+    "Backup codes",
+  );
+}
+
+async function settingsPage({ emailErrors = {}, passwordErrors = {}, emailValue, twoStepErrors } = {}) {
   if (!user) user = (await api("/me")).user;
+  const twoStep = await api("/settings/two-step");
   bankPage(
     "settings",
     html`<h1 class="page-title">Settings</h1>
@@ -567,6 +706,7 @@ async function settingsPage({ emailErrors = {}, passwordErrors = {}, emailValue 
         <button class="button button-primary" type="submit">Update password</button>
       </form>
     </section>
+    ${twoStepPanel(twoStep, twoStepErrors)}
     <form class="signout" data-action="logout">
       <button class="button button-block" type="submit">Sign out</button>
     </form>`,
@@ -577,6 +717,8 @@ async function settingsPage({ emailErrors = {}, passwordErrors = {}, emailValue 
 const ROUTES = [
   [/^\/login$/, loginView, "public"],
   [/^\/signup$/, signupView, "public"],
+  [/^\/login\/code$/, codeView, "public"],
+  [/^\/login\/new-password$/, newPasswordView, "public"],
   [/^\/$/, accountPage],
   [/^\/activity$/, activityPage],
   [/^\/activity\/([\w-]+)$/, receiptPage],
@@ -588,6 +730,7 @@ const ROUTES = [
   [/^\/people$/, peoplePage],
   [/^\/people\/([^/]+)$/, personPage],
   [/^\/settings$/, settingsPage],
+  [/^\/settings\/two-step$/, twoStepSetupPage],
 ];
 
 async function route() {
@@ -616,10 +759,58 @@ const ACTIONS = {
   async login(form) {
     const values = formValues(form);
     try {
-      saveSession(await api("/login", values));
-      go("/");
+      afterLogin(await api("/login", values));
     } catch (err) {
       loginView({ values, error: err.message });
+    }
+  },
+
+  async code(form) {
+    const values = formValues(form);
+    try {
+      afterLogin(await api("/login/code", { challenge: loginStep?.challenge, code: values.code }));
+    } catch (err) {
+      if (err.status === 401 && /expired/i.test(err.message)) {
+        loginStep = null;
+        return loginView({ error: err.message });
+      }
+      codeView({ error: err.message });
+    }
+  },
+
+  async "new-password"(form) {
+    const values = formValues(form);
+    try {
+      afterLogin(await api("/login/password", { challenge: loginStep?.challenge, ...values }));
+    } catch (err) {
+      if (err.status === 401) {
+        loginStep = null;
+        return loginView({ error: err.message });
+      }
+      newPasswordView({ errors: err.errors, error: err.message });
+    }
+  },
+
+  async "two-step-on"(form) {
+    try {
+      const result = await api("/settings/two-step/enable", formValues(form));
+      twoStepSetup = null;
+      backupCodesPage(result.backupCodes);
+    } catch (err) {
+      if (err.status === 401) return;
+      twoStepSetupPage({ errors: err.errors });
+    }
+  },
+
+  async "two-step-off"(form) {
+    if (!window.confirm("Turn off two-step verification?")) return;
+    try {
+      await api("/settings/two-step/disable", formValues(form));
+      flash = "Two-step verification turned off.";
+      settingsPage();
+    } catch (err) {
+      if (err.status === 401) return;
+      settingsPage({ twoStepErrors: err.errors });
     }
   },
 

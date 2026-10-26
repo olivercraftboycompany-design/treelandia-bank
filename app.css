@@ -881,3 +881,92 @@ form + form .button-block {
 [hidden] {
   display: none !important;
 }
+.password-wrap {
+  position: relative;
+}
+
+.password-wrap input {
+  padding-right: 48px;
+}
+
+.reveal {
+  position: absolute;
+  top: 0;
+  right: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.reveal:hover {
+  color: var(--navy);
+}
+
+.reveal:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -4px;
+  border-radius: var(--radius);
+}
+
+.panel-head .badge {
+  background: var(--bg);
+  color: var(--muted);
+  border: 1px solid var(--line);
+}
+
+.panel-head .badge-on {
+  background: var(--navy);
+  color: #fff;
+  border-color: var(--navy);
+}
+
+.two-step-setup .qr-frame {
+  display: flex;
+  justify-content: center;
+  padding: 20px 16px 8px;
+}
+
+.two-step-setup .qr {
+  width: 200px;
+  height: 200px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+.secret {
+  letter-spacing: 0.04em;
+}
+
+#two-step .details,
+.two-step-setup .details {
+  margin-bottom: 16px;
+  padding: 0;
+}
+
+.two-step-setup .qr-frame {
+  padding-top: 0;
+}
+
+.backup-codes {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px;
+  margin: 0 0 16px;
+  padding: 0;
+  list-style: none;
+  font-size: 15px;
+}
+
+.backup-codes li {
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  text-align: center;
+}

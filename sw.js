@@ -1,4 +1,4 @@
-const VERSION = "1";
+const VERSION = "2";
 const CACHE = `treelandia-static-${VERSION}`;
 const OFFLINE = "./offline.html";
 const PRECACHE = [OFFLINE, "./app.css", "./app.js", "./icons/icon-192.png"];
