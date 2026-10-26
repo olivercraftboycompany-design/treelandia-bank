@@ -1,0 +1,760 @@
+const API = "https://bankoftreelandia.sites.tab.bot/api";
+const BANK_NAME = "Bank of Treelandia";
+const SYMBOL = "P$";
+const TOKEN_KEY = "treelandia.token";
+
+const app = document.getElementById("app");
+let token = localStorage.getItem(TOKEN_KEY);
+let user = null;
+let flash = null;
+let pendingSend = null;
+
+class Safe {
+  constructor(value) {
+    this.value = value;
+  }
+  toString() {
+    return this.value;
+  }
+}
+
+const ESCAPES = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
+
+function escape(value) {
+  if (value == null || value === false) return "";
+  if (Array.isArray(value)) return value.map(escape).join("");
+  if (value instanceof Safe) return value.value;
+  return String(value).replace(/[&<>"']/g, (c) => ESCAPES[c]);
+}
+
+function html(strings, ...values) {
+  let out = strings[0];
+  values.forEach((value, i) => (out += escape(value) + strings[i + 1]));
+  return new Safe(out);
+}
+
+const ICONS = {
+  home: '<path d="M3 10.5 12 3l9 7.5"/><path d="M5 9v12h14V9"/>',
+  send: '<path d="M7 17 17 7"/><path d="M8 7h9v9"/>',
+  request: '<path d="M17 7 7 17"/><path d="M16 17H7V8"/>',
+  inbox: '<path d="M3 13h5l1.5 3h5L16 13h5"/><path d="M5.5 5h13L21 13v6H3v-6z"/>',
+  search: '<circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/>',
+  settings:
+    '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/>',
+  chevron: '<path d="m9 6 6 6-6 6"/>',
+};
+
+function icon(name) {
+  return new Safe(
+    `<svg class="icon" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name]}</svg>`,
+  );
+}
+
+function money(cents, signed = false) {
+  const abs = Math.abs(cents);
+  const text = `${SYMBOL}${Math.floor(abs / 100).toLocaleString("en-US")}.${String(abs % 100).padStart(2, "0")}`;
+  if (cents < 0) return `\u2212${text}`;
+  if (signed && cents > 0) return `+${text}`;
+  return text;
+}
+
+const dateFormat = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", year: "numeric" });
+const dateTimeFormat = new Intl.DateTimeFormat(undefined, {
+  month: "short",
+  day: "numeric",
+  year: "numeric",
+  hour: "numeric",
+  minute: "2-digit",
+});
+
+function time(seconds, withTime = false) {
+  const date = new Date(seconds * 1000);
+  return html`<time datetime="${date.toISOString()}">${(withTime ? dateTimeFormat : dateFormat).format(date)}</time>`;
+}
+
+class ApiError extends Error {
+  constructor(status, message, errors = {}) {
+    super(message ?? "Something went wrong. Please try again.");
+    this.status = status;
+    this.errors = errors;
+  }
+}
+
+async function api(path, body) {
+  const headers = {};
+  if (token) headers.Authorization = `Bearer ${token}`;
+  if (body) headers["Content-Type"] = "application/json";
+  let res;
+  try {
+    res = await fetch(API + path, { method: body ? "POST" : "GET", headers, body: body ? JSON.stringify(body) : undefined });
+  } catch {
+    throw new ApiError(0, "Can't reach the bank right now. Check your connection and try again.");
+  }
+  const data = await res.json().catch(() => ({}));
+  if (res.status === 401 && token) {
+    forgetSession();
+    go("/login");
+    throw new ApiError(401, "Your session expired. Sign in again.");
+  }
+  if (!res.ok) {
+    const errors = data.errors || {};
+    throw new ApiError(res.status, data.error || (Object.keys(errors).length ? "" : null), errors);
+  }
+  return data;
+}
+
+function saveSession(data) {
+  token = data.token;
+  user = data.user;
+  localStorage.setItem(TOKEN_KEY, token);
+}
+
+function forgetSession() {
+  token = null;
+  user = null;
+  pendingSend = null;
+  localStorage.removeItem(TOKEN_KEY);
+}
+
+function go(path) {
+  if (location.hash === `#${path}`) route();
+  else location.hash = path;
+}
+
+function currentRoute() {
+  const raw = location.hash.replace(/^#/, "") || "/";
+  const [path, query = ""] = raw.split("?");
+  return { path: path || "/", query: new URLSearchParams(query) };
+}
+
+function alert(message, tone = "error") {
+  if (!message) return "";
+  return html`<div class="alert alert-${tone}" role="${tone === "error" ? "alert" : "status"}">${message}</div>`;
+}
+
+function field({ label, name, type = "text", value = "", error, autocomplete, inputmode, required = true, prefix, maxlength }) {
+  const id = `field-${name}`;
+  const input = html`<input id="${id}" name="${name}" type="${type}" value="${value}"${autocomplete ? html` autocomplete="${autocomplete}"` : ""}${
+    inputmode ? html` inputmode="${inputmode}"` : ""
+  }${maxlength ? html` maxlength="${maxlength}"` : ""}${required ? html` required` : ""}${error ? html` aria-invalid="true"` : ""}>`;
+  return html`<div class="field${error ? " has-error" : ""}">
+    <label for="${id}">${label}</label>
+    ${prefix ? html`<div class="input-prefix"><span>${prefix}</span>${input}</div>` : input}
+    ${error ? html`<p class="field-error">${error}</p>` : ""}
+  </div>`;
+}
+
+const NAV = [
+  { href: "/", label: "Home", icon: "home", section: "account" },
+  { href: "/send", label: "Send", icon: "send", section: "send" },
+  { href: "/request", label: "Request", icon: "request", section: "request" },
+  { href: "/requests", label: "Requests", icon: "inbox", section: "requests" },
+  { href: "/people", label: "People", icon: "search", section: "people" },
+];
+
+function publicPage(body) {
+  document.body.className = "public";
+  app.innerHTML = html`<main class="public-main">
+    <a class="wordmark wordmark-dark" href="#/login">${BANK_NAME}</a>
+    ${body}
+  </main>`;
+  focusFirstError();
+}
+
+function bankPage(section, body, title) {
+  document.body.className = "bank";
+  document.title = title ? `${title} - ${BANK_NAME}` : BANK_NAME;
+  const badge = user?.pendingRequests > 0 ? html`<span class="badge">${user.pendingRequests}</span>` : "";
+  const link = (item, className) => html`<a class="${className}${item.section === section ? " is-active" : ""}" href="#${item.href}"${
+    item.section === section ? html` aria-current="page"` : ""
+  }>${icon(item.icon)}<span>${item.label}</span>${item.section === "requests" ? badge : ""}</a>`;
+  const message = flash;
+  flash = null;
+
+  app.innerHTML = html`<header class="topbar">
+      <div class="wrap topbar-inner">
+        <a class="wordmark" href="#/">${BANK_NAME}</a>
+        <nav class="topnav" aria-label="Main">
+          ${NAV.map((item) => link(item, "topnav-link"))}
+          <a class="topnav-link${section === "settings" ? " is-active" : ""}" href="#/settings">${icon("settings")}<span>Settings</span></a>
+        </nav>
+        <a class="topbar-settings${section === "settings" ? " is-active" : ""}" href="#/settings" aria-label="Settings">${icon("settings")}</a>
+      </div>
+    </header>
+    <main class="wrap main">
+      ${alert(message, "success")}
+      ${body}
+    </main>
+    <nav class="tabbar" aria-label="Main">
+      ${NAV.map((item) => link(item, "tabbar-link"))}
+    </nav>`;
+  focusFirstError();
+}
+
+function focusFirstError() {
+  app.querySelector("[aria-invalid=true]")?.focus();
+}
+
+function errorPage(section, error) {
+  bankPage(section, html`<section class="panel empty-state"><h1>${error.message}</h1><p><a href="#/">Go to your account</a></p></section>`);
+}
+
+function loginView({ values = {}, error } = {}) {
+  document.title = `Sign in - ${BANK_NAME}`;
+  publicPage(html`<section class="auth-card">
+    <h1>Sign in</h1>
+    ${alert(error)}
+    <form data-action="login" novalidate>
+      ${field({ label: "Username or email", name: "login", value: values.login, autocomplete: "username" })}
+      ${field({ label: "Password", name: "password", type: "password", autocomplete: "current-password" })}
+      <button class="button button-primary button-block" type="submit">Sign in</button>
+    </form>
+    <p class="auth-switch">New to ${BANK_NAME}? <a href="#/signup">Open an account</a></p>
+  </section>`);
+}
+
+function signupView({ values = {}, errors = {}, error } = {}) {
+  document.title = `Open an account - ${BANK_NAME}`;
+  publicPage(html`<section class="auth-card">
+    <h1>Open an account</h1>
+    ${alert(error)}
+    <form data-action="signup" novalidate>
+      ${field({ label: "Username", name: "username", value: values.username, autocomplete: "username", maxlength: 20, error: errors.username })}
+      ${field({ label: "Email", name: "email", type: "email", value: values.email, autocomplete: "email", error: errors.email })}
+      ${field({ label: "Password", name: "password", type: "password", autocomplete: "new-password", error: errors.password })}
+      ${field({ label: "Confirm password", name: "confirm", type: "password", autocomplete: "new-password", error: errors.confirm })}
+      <button class="button button-primary button-block" type="submit">Create account</button>
+    </form>
+    <p class="auth-switch">Already have an account? <a href="#/login">Sign in</a></p>
+  </section>`);
+}
+
+function activityList(transactions) {
+  if (!transactions.length) return html`<p class="empty">No transactions yet.</p>`;
+  return html`<ul class="list">${transactions.map(
+    (tx) => html`<li>
+      <a class="row" href="#/activity/${tx.ref}">
+        <div class="row-main">
+          <span class="row-title">${tx.title}</span>
+          <span class="row-sub">${tx.memo || tx.label}</span>
+        </div>
+        <div class="row-end">
+          <span class="amount${tx.amount > 0 ? " amount-in" : ""}">${money(tx.amount, true)}</span>
+          <span class="row-sub">${time(tx.createdAt)}${tx.reversed ? " \u00b7 Reversed" : ""}</span>
+        </div>
+      </a>
+    </li>`,
+  )}</ul>`;
+}
+
+function requestRow(request, incoming) {
+  return html`<li class="row">
+    <div class="row-main">
+      <span class="row-title">${incoming ? request.requester : request.payer}</span>
+      <span class="row-sub">${request.memo || "Payment request"} \u00b7 ${time(request.createdAt)}</span>
+    </div>
+    <div class="row-end">
+      <span class="amount">${money(request.amount)}</span>
+      <div class="row-actions">
+        ${
+          incoming
+            ? html`<a class="button button-primary button-small" href="#/requests/${request.id}">Pay</a>
+              <form data-action="decline" data-id="${request.id}"><button class="button button-small" type="submit">Decline</button></form>`
+            : html`<form data-action="cancel" data-id="${request.id}"><button class="button button-small" type="submit">Cancel</button></form>`
+        }
+      </div>
+    </div>
+  </li>`;
+}
+
+async function accountPage() {
+  const data = await api("/me");
+  user = data.user;
+  bankPage(
+    "account",
+    html`<section class="balance-card">
+      <span class="balance-label">Available balance</span>
+      <span class="balance-amount">${money(user.balance)}</span>
+      <span class="balance-owner">${user.username}</span>
+      <div class="balance-actions">
+        <a class="button button-light" href="#/send">${icon("send")}Send</a>
+        <a class="button button-outline-light" href="#/request">${icon("request")}Request</a>
+      </div>
+    </section>
+    ${user.status === "frozen" ? alert("Your account is frozen. Sending and paying are disabled.") : ""}
+    ${
+      data.incoming.length
+        ? html`<section class="panel">
+          <header class="panel-head"><h2>Requests for you</h2><a href="#/requests">View all</a></header>
+          <ul class="list">${data.incoming.map((r) => requestRow(r, true))}</ul>
+        </section>`
+        : ""
+    }
+    <section class="panel">
+      <header class="panel-head"><h2>Recent activity</h2><a href="#/activity">View all</a></header>
+      ${activityList(data.recent)}
+    </section>`,
+    "Account",
+  );
+}
+
+async function activityPage({ query }) {
+  const before = Number(query.get("before")) || null;
+  const data = await api(`/activity${before ? `?before=${before}` : ""}`);
+  bankPage(
+    "account",
+    html`<h1 class="page-title">Activity</h1>
+    <section class="panel">
+      ${activityList(data.transactions)}
+      ${
+        before || data.nextBefore
+          ? html`<nav class="pager">
+            ${before ? html`<a href="#/activity">Newest</a>` : html`<span></span>`}
+            ${data.nextBefore ? html`<a href="#/activity?before=${data.nextBefore}">Older</a>` : ""}
+          </nav>`
+          : ""
+      }
+    </section>`,
+    "Activity",
+  );
+}
+
+async function receiptPage({ params }) {
+  let tx;
+  try {
+    ({ transaction: tx } = await api(`/activity/${encodeURIComponent(params[0])}`));
+  } catch (err) {
+    if (err.status === 404) return errorPage("account", new Error("Page not found"));
+    throw err;
+  }
+  bankPage(
+    "account",
+    html`<a class="back" href="#/activity">Activity</a>
+    <section class="panel receipt">
+      <span class="receipt-label">${tx.label}</span>
+      <span class="receipt-amount${tx.amount > 0 ? " amount-in" : ""}">${money(tx.amount, true)}</span>
+      ${tx.reversed ? html`<span class="status status-muted">Reversed</span>` : ""}
+      <dl class="details">
+        <div><dt>From</dt><dd>${tx.from}</dd></div>
+        <div><dt>To</dt><dd>${tx.to}</dd></div>
+        ${tx.memo ? html`<div><dt>Note</dt><dd>${tx.memo}</dd></div>` : ""}
+        ${tx.originalRef ? html`<div><dt>Reverses</dt><dd><a href="#/activity/${tx.originalRef}">${tx.originalRef}</a></dd></div>` : ""}
+        <div><dt>Date</dt><dd>${time(tx.createdAt, true)}</dd></div>
+        <div><dt>Reference</dt><dd class="mono">${tx.ref}</dd></div>
+      </dl>
+    </section>`,
+    "Transaction",
+  );
+}
+
+function sendPage({ query, values, errors = {}, error } = {}) {
+  values ??= { to: query?.get("to") || "", amount: query?.get("amount") || "", memo: query?.get("memo") || "" };
+  bankPage(
+    "send",
+    html`<h1 class="page-title">Send money</h1>
+    <section class="panel panel-form">
+      ${alert(error)}
+      <form data-action="send" novalidate>
+        ${field({ label: "To", name: "to", value: values.to, prefix: "@", autocomplete: "off", maxlength: 21, error: errors.to })}
+        ${field({ label: "Amount", name: "amount", value: values.amount, prefix: SYMBOL, inputmode: "decimal", autocomplete: "off", error: errors.amount })}
+        ${field({ label: "Note", name: "memo", value: values.memo, required: false, maxlength: 140, autocomplete: "off", error: errors.memo })}
+        <button class="button button-primary button-block" type="submit">Continue</button>
+      </form>
+    </section>`,
+    "Send money",
+  );
+}
+
+function reviewPage() {
+  if (!pendingSend) return go("/send");
+  const p = pendingSend;
+  const edit = new URLSearchParams({ to: p.to, amount: p.amountInput, memo: p.memo || "" });
+  bankPage(
+    "send",
+    html`<h1 class="page-title">Review payment</h1>
+    <section class="panel panel-form">
+      <dl class="details details-review">
+        <div><dt>To</dt><dd>${p.to}</dd></div>
+        <div><dt>Amount</dt><dd class="strong">${money(p.amount)}</dd></div>
+        ${p.memo ? html`<div><dt>Note</dt><dd>${p.memo}</dd></div>` : ""}
+      </dl>
+      <form data-action="confirm-send">
+        <button class="button button-primary button-block" type="submit">Send ${money(p.amount)}</button>
+      </form>
+      <a class="button button-block" href="#/send?${edit}">Edit</a>
+    </section>`,
+    "Review payment",
+  );
+}
+
+function requestPage({ query, values, errors = {}, error } = {}) {
+  values ??= { from: query?.get("from") || "" };
+  bankPage(
+    "request",
+    html`<h1 class="page-title">Request money</h1>
+    <section class="panel panel-form">
+      ${alert(error)}
+      <form data-action="request" novalidate>
+        ${field({ label: "From", name: "from", value: values.from, prefix: "@", autocomplete: "off", maxlength: 21, error: errors.from })}
+        ${field({ label: "Amount", name: "amount", value: values.amount, prefix: SYMBOL, inputmode: "decimal", autocomplete: "off", error: errors.amount })}
+        ${field({ label: "Note", name: "memo", value: values.memo, required: false, maxlength: 140, autocomplete: "off", error: errors.memo })}
+        <button class="button button-primary button-block" type="submit">Send request</button>
+      </form>
+    </section>`,
+    "Request money",
+  );
+}
+
+const REQUEST_STATUS = { paid: "Paid", declined: "Declined", cancelled: "Cancelled" };
+
+async function requestsPage() {
+  const [data, me] = await Promise.all([api("/requests"), api("/me")]);
+  user = me.user;
+  bankPage(
+    "requests",
+    html`<h1 class="page-title">Requests</h1>
+    <section class="panel">
+      <header class="panel-head"><h2>Waiting for you</h2></header>
+      ${data.incoming.length ? html`<ul class="list">${data.incoming.map((r) => requestRow(r, true))}</ul>` : html`<p class="empty">No requests.</p>`}
+    </section>
+    <section class="panel">
+      <header class="panel-head"><h2>Sent by you</h2><a href="#/request">New request</a></header>
+      ${data.outgoing.length ? html`<ul class="list">${data.outgoing.map((r) => requestRow(r, false))}</ul>` : html`<p class="empty">No open requests.</p>`}
+    </section>
+    ${
+      data.history.length
+        ? html`<section class="panel">
+          <header class="panel-head"><h2>History</h2></header>
+          <ul class="list">
+            ${data.history.map(
+              (r) => html`<li class="row">
+                <div class="row-main">
+                  <span class="row-title">${r.incoming ? `${r.requester} requested` : `Requested from ${r.payer}`}</span>
+                  <span class="row-sub">${r.memo || "Payment request"} \u00b7 ${time(r.resolvedAt || r.createdAt)}</span>
+                </div>
+                <div class="row-end">
+                  <span class="amount">${money(r.amount)}</span>
+                  <span class="status status-${r.status}">${REQUEST_STATUS[r.status]}</span>
+                </div>
+              </li>`,
+            )}
+          </ul>
+        </section>`
+        : ""
+    }`,
+    "Requests",
+  );
+}
+
+async function payRequestPage({ params, error }) {
+  let request;
+  try {
+    ({ request } = await api(`/requests/${encodeURIComponent(params[0])}`));
+  } catch (err) {
+    if (err.status !== 404) throw err;
+    flash = err.message;
+    return go("/requests");
+  }
+  bankPage(
+    "requests",
+    html`<a class="back" href="#/requests">Requests</a>
+    <h1 class="page-title">Pay request</h1>
+    <section class="panel panel-form">
+      ${alert(error)}
+      <dl class="details details-review">
+        <div><dt>To</dt><dd>${request.requester}</dd></div>
+        <div><dt>Amount</dt><dd class="strong">${money(request.amount)}</dd></div>
+        ${request.memo ? html`<div><dt>Note</dt><dd>${request.memo}</dd></div>` : ""}
+        <div><dt>Requested</dt><dd>${time(request.createdAt, true)}</dd></div>
+      </dl>
+      <form data-action="pay" data-id="${request.id}">
+        <button class="button button-primary button-block" type="submit">Pay ${money(request.amount)}</button>
+      </form>
+      <form data-action="decline" data-id="${request.id}">
+        <button class="button button-block" type="submit">Decline</button>
+      </form>
+    </section>`,
+    "Pay request",
+  );
+}
+
+async function peoplePage({ query: params }) {
+  const q = params.get("q") || "";
+  const data = q ? await api(`/people?q=${encodeURIComponent(q)}`) : { query: "", results: [] };
+  bankPage(
+    "people",
+    html`<h1 class="page-title">People</h1>
+    <form class="search" data-action="search" role="search">
+      <label class="visually-hidden" for="people-q">Username</label>
+      <div class="input-prefix"><span>@</span><input id="people-q" name="q" type="search" value="${data.query}" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Username"></div>
+      <button class="button button-primary" type="submit">Search</button>
+    </form>
+    ${
+      data.query
+        ? html`<section class="panel">
+          ${
+            data.results.length
+              ? html`<ul class="list">${data.results.map(
+                  (person) => html`<li><a class="row" href="#/people/${person.username}">
+                    <div class="row-main"><span class="row-title">${person.username}</span><span class="row-sub">Member since ${time(person.createdAt)}</span></div>
+                    <span class="row-chevron">${icon("chevron")}</span>
+                  </a></li>`,
+                )}</ul>`
+              : html`<p class="empty">No accounts found.</p>`
+          }
+        </section>`
+        : ""
+    }`,
+    "People",
+  );
+}
+
+async function personPage({ params }) {
+  let person;
+  try {
+    person = await api(`/people/${encodeURIComponent(params[0])}`);
+  } catch (err) {
+    if (err.status === 404) return errorPage("people", new Error("Page not found"));
+    throw err;
+  }
+  bankPage(
+    "people",
+    html`<a class="back" href="#/people">People</a>
+    <section class="panel profile">
+      <span class="avatar" aria-hidden="true">${person.username.slice(0, 1).toUpperCase()}</span>
+      <h1>${person.username}</h1>
+      <p class="row-sub">Member since ${time(person.createdAt)}</p>
+      ${
+        person.isSelf
+          ? ""
+          : html`<div class="profile-actions">
+            <a class="button button-primary" href="#/send?to=${encodeURIComponent(person.username)}">Send</a>
+            <a class="button" href="#/request?from=${encodeURIComponent(person.username)}">Request</a>
+          </div>`
+      }
+    </section>`,
+    person.username,
+  );
+}
+
+async function settingsPage({ emailErrors = {}, passwordErrors = {}, emailValue } = {}) {
+  if (!user) user = (await api("/me")).user;
+  bankPage(
+    "settings",
+    html`<h1 class="page-title">Settings</h1>
+    <section class="panel">
+      <header class="panel-head"><h2>Account</h2></header>
+      <dl class="details">
+        <div><dt>Username</dt><dd>${user.username}</dd></div>
+        <div><dt>Email</dt><dd>${user.email}</dd></div>
+        <div><dt>Member since</dt><dd>${time(user.createdAt)}</dd></div>
+      </dl>
+    </section>
+    <section class="panel panel-form">
+      <header class="panel-head"><h2>Change email</h2></header>
+      <form data-action="email" novalidate>
+        ${field({ label: "New email", name: "email", type: "email", value: emailValue, autocomplete: "email", error: emailErrors.email })}
+        ${field({ label: "Current password", name: "password", type: "password", autocomplete: "current-password", error: emailErrors.password })}
+        <button class="button button-primary" type="submit">Update email</button>
+      </form>
+    </section>
+    <section class="panel panel-form">
+      <header class="panel-head"><h2>Change password</h2></header>
+      <form data-action="password" novalidate>
+        ${field({ label: "Current password", name: "current", type: "password", autocomplete: "current-password", error: passwordErrors.current })}
+        ${field({ label: "New password", name: "password", type: "password", autocomplete: "new-password", error: passwordErrors.password })}
+        ${field({ label: "Confirm new password", name: "confirm", type: "password", autocomplete: "new-password", error: passwordErrors.confirm })}
+        <button class="button button-primary" type="submit">Update password</button>
+      </form>
+    </section>
+    <form class="signout" data-action="logout">
+      <button class="button button-block" type="submit">Sign out</button>
+    </form>`,
+    "Settings",
+  );
+}
+
+const ROUTES = [
+  [/^\/login$/, loginView, "public"],
+  [/^\/signup$/, signupView, "public"],
+  [/^\/$/, accountPage],
+  [/^\/activity$/, activityPage],
+  [/^\/activity\/([\w-]+)$/, receiptPage],
+  [/^\/send$/, sendPage],
+  [/^\/send\/review$/, reviewPage],
+  [/^\/request$/, requestPage],
+  [/^\/requests$/, requestsPage],
+  [/^\/requests\/(\d+)$/, payRequestPage],
+  [/^\/people$/, peoplePage],
+  [/^\/people\/([^/]+)$/, personPage],
+  [/^\/settings$/, settingsPage],
+];
+
+async function route() {
+  const { path, query } = currentRoute();
+  const found = ROUTES.find(([pattern]) => pattern.test(path));
+  if (!found) return go(token ? "/" : "/login");
+
+  const [pattern, view, access] = found;
+  if (access === "public" && token) return go("/");
+  if (access !== "public" && !token) return go("/login");
+
+  const params = path.match(pattern).slice(1).map(decodeURIComponent);
+  try {
+    await view({ query, params });
+  } catch (err) {
+    if (err.status !== 401) errorPage(null, err);
+  }
+  window.scrollTo(0, 0);
+}
+
+function formValues(form) {
+  return Object.fromEntries(new FormData(form));
+}
+
+const ACTIONS = {
+  async login(form) {
+    const values = formValues(form);
+    try {
+      saveSession(await api("/login", values));
+      go("/");
+    } catch (err) {
+      loginView({ values, error: err.message });
+    }
+  },
+
+  async signup(form) {
+    const values = formValues(form);
+    try {
+      saveSession(await api("/signup", values));
+      go("/");
+    } catch (err) {
+      signupView({ values, errors: err.errors, error: err.message });
+    }
+  },
+
+  async logout() {
+    await api("/logout", {}).catch(() => {});
+    forgetSession();
+    go("/login");
+  },
+
+  async send(form) {
+    const values = formValues(form);
+    try {
+      pendingSend = await api("/send/review", values);
+      go("/send/review");
+    } catch (err) {
+      if (err.status === 401) return;
+      sendPage({ values, errors: err.errors, error: err.message });
+    }
+  },
+
+  async "confirm-send"() {
+    const p = pendingSend;
+    try {
+      const result = await api("/send", { to: p.to, amount: p.amountInput, memo: p.memo || "", key: p.key });
+      pendingSend = null;
+      go(result.ref ? `/activity/${result.ref}` : "/activity");
+    } catch (err) {
+      if (err.status === 401) return;
+      pendingSend = null;
+      sendPage({ values: { to: p.to, amount: p.amountInput, memo: p.memo }, errors: err.errors, error: err.message });
+    }
+  },
+
+  async request(form) {
+    const values = formValues(form);
+    try {
+      const result = await api("/request", values);
+      flash = `Request sent to ${result.to}.`;
+      go("/requests");
+    } catch (err) {
+      if (err.status === 401) return;
+      requestPage({ values, errors: err.errors, error: err.message });
+    }
+  },
+
+  async pay(form) {
+    try {
+      const result = await api(`/requests/${form.dataset.id}/pay`, {});
+      go(`/activity/${result.ref}`);
+    } catch (err) {
+      if (err.status === 401) return;
+      if (err.status === 404) {
+        flash = err.message;
+        return go("/requests");
+      }
+      payRequestPage({ params: [form.dataset.id], error: err.message });
+    }
+  },
+
+  async decline(form) {
+    await closeRequest(form.dataset.id, "decline", "Request declined.");
+  },
+
+  async cancel(form) {
+    await closeRequest(form.dataset.id, "cancel", "Request cancelled.");
+  },
+
+  search(form) {
+    const q = formValues(form).q.trim();
+    go(q ? `/people?q=${encodeURIComponent(q)}` : "/people");
+  },
+
+  async email(form) {
+    const values = formValues(form);
+    try {
+      const result = await api("/settings/email", values);
+      user.email = result.email;
+      flash = "Email updated.";
+      settingsPage();
+    } catch (err) {
+      if (err.status === 401) return;
+      settingsPage({ emailErrors: err.errors, emailValue: values.email });
+    }
+  },
+
+  async password(form) {
+    try {
+      await api("/settings/password", formValues(form));
+      flash = "Password updated. Other devices have been signed out.";
+      settingsPage();
+    } catch (err) {
+      if (err.status === 401) return;
+      settingsPage({ passwordErrors: err.errors });
+    }
+  },
+};
+
+async function closeRequest(id, action, message) {
+  try {
+    await api(`/requests/${id}/${action}`, {});
+    flash = message;
+  } catch (err) {
+    if (err.status === 401) return;
+    flash = err.message;
+  }
+  if (currentRoute().path === "/requests") route();
+  else go("/requests");
+}
+
+document.addEventListener("submit", async (event) => {
+  const form = event.target;
+  const action = ACTIONS[form.dataset.action];
+  if (!action) return;
+  event.preventDefault();
+  if (form.dataset.submitting) return;
+  form.dataset.submitting = "true";
+  const button = form.querySelector("button[type=submit]");
+  if (button) button.disabled = true;
+  try {
+    await action(form);
+  } finally {
+    delete form.dataset.submitting;
+    if (button) button.disabled = false;
+  }
+});
+
+window.addEventListener("hashchange", route);
+route();
